@@ -21,18 +21,27 @@ L'API Freebox nécessite un flow d'authentification HMAC-SHA1 (app_token → cha
 
 ### 1. Déployer
 
+```bash
+cp .env.example .env
+# Éditez .env selon vos besoins
+```
+
 ```yaml
 # docker-compose.yml
 services:
   freebox-proxy:
-    image: ghcr.io/calaxo/freebox-proxy:latest
+    image: ghcr.io/<your-github-user>/freebox-proxy:latest
     container_name: freebox-proxy
     restart: unless-stopped
+    env_file: .env
     ports:
-      - "5656:5656"
+      - "${LISTEN_PORT:-5656}:${LISTEN_PORT:-5656}"
     volumes:
       - freebox_data:/data
     network_mode: host
+
+volumes:
+  freebox_data:
 ```
 
 ### 2. Enregistrer (une seule fois)
