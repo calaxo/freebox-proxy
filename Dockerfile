@@ -9,6 +9,7 @@ COPY main.py .
 
 RUN mkdir -p /data
 
-EXPOSE 5656
+ENV LISTEN_PORT=5656
+EXPOSE ${LISTEN_PORT}
 
-CMD ["gunicorn", "-b", "0.0.0.0:5656", "-w", "1", "--timeout", "30", "main:app"]
+CMD ["sh", "-c", "gunicorn -b 0.0.0.0:${LISTEN_PORT} -w 1 --timeout 30 main:app"]

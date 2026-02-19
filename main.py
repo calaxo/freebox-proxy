@@ -21,16 +21,17 @@ import requests
 from flask import Flask, jsonify
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Configuration (all configurable via environment / .env)
 # ---------------------------------------------------------------------------
 FREEBOX_URL = os.environ.get("FREEBOX_URL", "http://mafreebox.freebox.fr")
 API_VERSION = os.environ.get("FREEBOX_API_VERSION", "v4")
 API_BASE = f"/api/{API_VERSION}"
 TOKEN_FILE = os.environ.get("TOKEN_FILE", "/data/app_token.json")
-APP_ID = "fr.homecallab.homepage"
-APP_NAME = "Homepage Dashboard"
-APP_VERSION = "1.0"
-DEVICE_NAME = os.environ.get("DEVICE_NAME", "HomeLab Server")
+APP_ID = os.environ.get("APP_ID", "fr.freebox.proxy")
+APP_NAME = os.environ.get("APP_NAME", "Freebox Proxy")
+APP_VERSION = os.environ.get("APP_VERSION", "1.0")
+DEVICE_NAME = os.environ.get("DEVICE_NAME", "Docker Server")
+LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "5656"))
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("freebox-proxy")
@@ -313,4 +314,4 @@ def connection_full():
 
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5656)
+    app.run(host="0.0.0.0", port=LISTEN_PORT)
