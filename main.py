@@ -287,12 +287,24 @@ def ftth():
 
 @app.route("/connection/full")
 def connection_full():
-    """Combined connection + system data in a single call for Homepage."""
+    """Combined connection + system + ftth data in a single call for Homepage."""
     conn = fbx_get("/connection/")
     sys_data = fbx_get("/system/")
+    ftth_data = fbx_get("/connection/ftth/")
 
     c = conn.get("result", {}) if conn.get("success") else {}
     s = sys_data.get("result", {}) if sys_data.get("success") else {}
+    f = ftth_data.get("result", {}) if ftth_data.get("success") else {}
+
+    # FTTH link status human-readable
+    if f.get("link"):
+        ftth_status = "Connecté"
+    elif f.get("sfp_has_signal"):
+        ftth_status = "Signal détecté"
+    elif f.get("sfp_present"):
+        ftth_status = "SFP présent (pas de signal)"
+    else:
+        ftth_status = "Déconnecté"
 
     return jsonify({
         "success": True,
@@ -302,12 +314,11 @@ def connection_full():
             "rate_up_mbps": round(c.get("rate_up", 0) * 8 / 1_000_000, 1),
             "bandwidth_down_gbps": round(c.get("bandwidth_down", 0) / 1_000_000_000, 1),
             "bandwidth_up_gbps": round(c.get("bandwidth_up", 0) / 1_000_000_000, 1),
-            "temp_cpum": s.get("temp_cpum", 0),
-            "temp_cpub": s.get("temp_cpub", 0),
-            "temp_sw": s.get("temp_sw", 0),
-            "fan_rpm": s.get("fan_rpm", 0),
             "uptime": s.get("uptime", ""),
             "firmware": s.get("firmware_version", ""),
+            "ftth_status": ftth_status,
+            "sfp_pwr_rx": round(f.get("sfp_pwr_rx", 0) / 100, 2) if f.get("sfp_pwr_rx") else 0,
+            "sfp_pwr_tx": round(f.get("sfp_pwr_tx", 0) / 100, 2) if f.get("sfp_pwr_tx") else 0,
         },
     })
 
