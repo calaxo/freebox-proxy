@@ -1,7 +1,10 @@
 """
-Freebox API Proxy for Homepage dashboard.
+Freebox API Proxy for Homepage dashboard + Connection Watchdog.
 Handles Freebox OS authentication (challenge + HMAC-SHA1) and exposes
 simple JSON endpoints that Homepage's customapi widget can consume.
+
+Includes a background watchdog that monitors internet connectivity
+and automatically reboots the Freebox if the connection drops.
 
 Usage:
   1. Start the container
@@ -9,6 +12,7 @@ Usage:
   3. Approve on the Freebox LCD screen
   4. Go to http://<host>:5656/register/status to confirm
   5. Done! /connection and /system endpoints are now available
+  6. Enable "Modification des réglages" permission in Freebox settings for reboot support
 """
 
 import os
@@ -17,6 +21,9 @@ import hmac
 import hashlib
 import time
 import logging
+import subprocess
+import threading
+from datetime import datetime, timezone
 import requests
 from flask import Flask, jsonify
 
@@ -32,6 +39,14 @@ APP_NAME = os.environ.get("APP_NAME", "Freebox Proxy")
 APP_VERSION = os.environ.get("APP_VERSION", "1.0")
 DEVICE_NAME = os.environ.get("DEVICE_NAME", "Docker Server")
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "5656"))
+
+# Watchdog configuration
+WATCHDOG_ENABLED = os.environ.get("WATCHDOG_ENABLED", "true").lower() in ("true", "1", "yes")
+WATCHDOG_INTERVAL = int(os.environ.get("WATCHDOG_INTERVAL", "60"))          # seconds between checks
+WATCHDOG_CHECK_IPS = os.environ.get("WATCHDOG_CHECK_IPS", "8.8.8.8,1.1.1.1").split(",")
+WATCHDOG_FREEBOX_IP = os.environ.get("WATCHDOG_FREEBOX_IP", "192.168.1.254")  # LAN IP to verify Freebox is reachable
+WATCHDOG_FAILURES_BEFORE_REBOOT = int(os.environ.get("WATCHDOG_FAILURES_BEFORE_REBOOT", "3"))
+WATCHDOG_COOLDOWN = int(os.environ.get("WATCHDOG_COOLDOWN", "300"))         # seconds to wait after a reboot before checking again
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("freebox-proxy")
@@ -128,6 +143,162 @@ def fbx_get(endpoint: str):
 
     return r.json()
 
+
+def fbx_post(endpoint: str, payload: dict = None):
+    """Authenticated POST to the Freebox API."""
+    session = get_session_token()
+    if not session:
+        return {"success": False, "error": "no_session"}
+
+    headers = {"X-Fbx-App-Auth": session}
+    r = requests.post(
+        f"{FREEBOX_URL}{API_BASE}{endpoint}",
+        headers=headers,
+        json=payload or {},
+        timeout=10,
+    )
+
+    if r.status_code == 403:
+        session = get_session_token(force=True)
+        if not session:
+            return {"success": False, "error": "auth_failed"}
+        headers = {"X-Fbx-App-Auth": session}
+        r = requests.post(
+            f"{FREEBOX_URL}{API_BASE}{endpoint}",
+            headers=headers,
+            json=payload or {},
+            timeout=10,
+        )
+
+    return r.json()
+
+
+# ---------------------------------------------------------------------------
+# Connection Watchdog
+# ---------------------------------------------------------------------------
+
+_watchdog_state = {
+    "running": False,
+    "consecutive_failures": 0,
+    "last_check": None,
+    "last_check_ok": None,
+    "last_reboot": None,
+    "total_reboots": 0,
+    "status": "starting",
+    "last_error": None,
+}
+
+
+def _ping(ip: str) -> bool:
+    """Ping an IP address once. Returns True if reachable."""
+    try:
+        return subprocess.call(
+            ["ping", "-c", "1", "-W", "2", ip],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ) == 0
+    except Exception:
+        return False
+
+
+def _check_internet() -> bool:
+    """Return True if at least one CHECK_IP responds to ping."""
+    for ip in WATCHDOG_CHECK_IPS:
+        ip = ip.strip()
+        if ip and _ping(ip):
+            return True
+    return False
+
+
+def _freebox_reachable() -> bool:
+    """Return True if the Freebox LAN IP responds to ping."""
+    return _ping(WATCHDOG_FREEBOX_IP)
+
+
+def _do_reboot():
+    """Reboot the Freebox via the API."""
+    log.warning("WATCHDOG: Rebooting Freebox...")
+    result = fbx_post("/system/reboot/")
+    if result.get("success"):
+        log.warning("WATCHDOG: Reboot command sent successfully")
+        _watchdog_state["last_reboot"] = datetime.now(timezone.utc).isoformat()
+        _watchdog_state["total_reboots"] += 1
+    else:
+        err = result.get("msg", result.get("error", "unknown"))
+        log.error("WATCHDOG: Reboot failed: %s", err)
+        _watchdog_state["last_error"] = f"Reboot failed: {err}"
+
+
+def _watchdog_loop():
+    """Background loop: check connectivity then reboot if needed."""
+    log.info("WATCHDOG: Started (interval=%ds, failures_before_reboot=%d, cooldown=%ds)",
+             WATCHDOG_INTERVAL, WATCHDOG_FAILURES_BEFORE_REBOOT, WATCHDOG_COOLDOWN)
+    _watchdog_state["running"] = True
+    _watchdog_state["status"] = "running"
+
+    # Wait a bit on startup for the network to settle
+    time.sleep(30)
+
+    while True:
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            _watchdog_state["last_check"] = now
+
+            if _check_internet():
+                # Internet OK
+                _watchdog_state["consecutive_failures"] = 0
+                _watchdog_state["last_check_ok"] = now
+                _watchdog_state["status"] = "ok"
+                log.debug("WATCHDOG: Internet OK")
+            else:
+                # Internet DOWN
+                _watchdog_state["consecutive_failures"] += 1
+                failures = _watchdog_state["consecutive_failures"]
+                log.warning("WATCHDOG: Internet unreachable (%d/%d)",
+                            failures, WATCHDOG_FAILURES_BEFORE_REBOOT)
+                _watchdog_state["status"] = f"internet_down ({failures}/{WATCHDOG_FAILURES_BEFORE_REBOOT})"
+
+                if failures >= WATCHDOG_FAILURES_BEFORE_REBOOT:
+                    # Verify Freebox itself is reachable on LAN before rebooting
+                    if _freebox_reachable():
+                        _watchdog_state["status"] = "rebooting"
+                        _do_reboot()
+                        _watchdog_state["consecutive_failures"] = 0
+                        # Cooldown after reboot
+                        log.info("WATCHDOG: Cooldown %ds after reboot...", WATCHDOG_COOLDOWN)
+                        time.sleep(WATCHDOG_COOLDOWN)
+                        continue
+                    else:
+                        log.warning("WATCHDOG: Freebox not reachable on LAN, skipping reboot (power issue?)")
+                        _watchdog_state["status"] = "freebox_unreachable"
+                        _watchdog_state["last_error"] = "Freebox not reachable on LAN"
+
+        except Exception as e:
+            log.error("WATCHDOG: Error: %s", e)
+            _watchdog_state["last_error"] = str(e)
+            _watchdog_state["status"] = f"error: {e}"
+
+        time.sleep(WATCHDOG_INTERVAL)
+
+
+def start_watchdog():
+    """Start the watchdog in a daemon thread."""
+    if not WATCHDOG_ENABLED:
+        log.info("WATCHDOG: Disabled via config")
+        _watchdog_state["status"] = "disabled"
+        return
+
+    token = load_token()
+    if not token or "app_token" not in token:
+        log.warning("WATCHDOG: No app_token yet, starting in standby. Register first, then restart.")
+        _watchdog_state["status"] = "no_token"
+        return
+
+    t = threading.Thread(target=_watchdog_loop, daemon=True)
+    t.start()
+
+
 # ---------------------------------------------------------------------------
 # Registration endpoints (one-time setup)
 # ---------------------------------------------------------------------------
@@ -214,8 +385,37 @@ def index():
     return jsonify({
         "service": "freebox-proxy",
         "registered": bool(token and "app_token" in token),
-        "endpoints": ["/connection", "/system", "/ftth", "/connection/full"],
+        "endpoints": ["/connection", "/system", "/ftth", "/connection/full", "/watchdog", "/reboot"],
+        "watchdog": _watchdog_state,
     })
+
+
+@app.route("/watchdog")
+def watchdog_status():
+    """Return the current watchdog state."""
+    return jsonify({
+        "success": True,
+        "result": _watchdog_state,
+        "config": {
+            "enabled": WATCHDOG_ENABLED,
+            "interval": WATCHDOG_INTERVAL,
+            "check_ips": WATCHDOG_CHECK_IPS,
+            "freebox_ip": WATCHDOG_FREEBOX_IP,
+            "failures_before_reboot": WATCHDOG_FAILURES_BEFORE_REBOOT,
+            "cooldown": WATCHDOG_COOLDOWN,
+        },
+    })
+
+
+@app.route("/reboot")
+def manual_reboot():
+    """Manually trigger a Freebox reboot."""
+    result = fbx_post("/system/reboot/")
+    if result.get("success"):
+        _watchdog_state["last_reboot"] = datetime.now(timezone.utc).isoformat()
+        _watchdog_state["total_reboots"] += 1
+        return jsonify({"success": True, "msg": "Reboot command sent."})
+    return jsonify({"success": False, "msg": result.get("msg", "Reboot failed"), "detail": result}), 500
 
 
 @app.route("/connection")
@@ -324,5 +524,8 @@ def connection_full():
 
 
 # ---------------------------------------------------------------------------
+# Start watchdog on module load (works with gunicorn)
+start_watchdog()
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=LISTEN_PORT)
