@@ -80,14 +80,14 @@ _session_cache = {"token": None, "expires": 0}
 
 
 def _get_challenge():
-    """Fetch the current authentication challenge."""
+    """Fetch the current one-time challenge string from the Freebox login endpoint."""
     r = requests.get(f"{FREEBOX_URL}{API_BASE}/login/", timeout=5)
     r.raise_for_status()
     return r.json()["result"]["challenge"]
 
 
 def _compute_password(app_token: str, challenge: str) -> str:
-    """HMAC-SHA1(app_token, challenge)"""
+    """Sign the challenge with the app_token using HMAC-SHA1, as required by Freebox OS auth."""
     return hmac.new(
         app_token.encode("utf-8"),
         challenge.encode("utf-8"),
@@ -96,7 +96,10 @@ def _compute_password(app_token: str, challenge: str) -> str:
 
 
 def get_session_token(force=False):
-    """Return a valid session_token, refreshing if needed."""
+    """Return a valid session_token, refreshing if the cached one is expired or missing.
+
+    Sessions last 10 minutes on the Freebox side; we cache to avoid a round-trip on every request.
+    Pass force=True to bypass the cache (used after a 403 to recover from a server-side expiry)."""
     now = time.time()
     if not force and _session_cache["token"] and now < _session_cache["expires"]:
         return _session_cache["token"]
@@ -125,7 +128,10 @@ def get_session_token(force=False):
 
 
 def fbx_get(endpoint: str):
-    """Authenticated GET to the Freebox API. Auto-refreshes session."""
+    """Authenticated GET to the Freebox API.
+
+    Retries once with a fresh session on 403, which happens when the Freebox invalidates
+    the session server-side before our 10-minute cache expires."""
     session = get_session_token()
     if not session:
         return {"success": False, "error": "no_session", "msg": "Not authenticated. Visit /register first."}
@@ -133,7 +139,6 @@ def fbx_get(endpoint: str):
     headers = {"X-Fbx-App-Auth": session}
     r = requests.get(f"{FREEBOX_URL}{API_BASE}{endpoint}", headers=headers, timeout=5)
 
-    # If 403, force-refresh the session and retry once
     if r.status_code == 403:
         session = get_session_token(force=True)
         if not session:
@@ -145,7 +150,7 @@ def fbx_get(endpoint: str):
 
 
 def fbx_post(endpoint: str, payload: dict = None):
-    """Authenticated POST to the Freebox API."""
+    """Authenticated POST to the Freebox API. Same 403-retry logic as fbx_get."""
     session = get_session_token()
     if not session:
         return {"success": False, "error": "no_session"}
@@ -237,7 +242,7 @@ def _watchdog_loop():
     _watchdog_state["running"] = True
     _watchdog_state["status"] = "running"
 
-    # Wait a bit on startup for the network to settle
+    # Give the network stack time to come up before the first check (useful in Docker on boot)
     time.sleep(30)
 
     while True:
@@ -260,7 +265,8 @@ def _watchdog_loop():
                 _watchdog_state["status"] = f"internet_down ({failures}/{WATCHDOG_FAILURES_BEFORE_REBOOT})"
 
                 if failures >= WATCHDOG_FAILURES_BEFORE_REBOOT:
-                    # Verify Freebox itself is reachable on LAN before rebooting
+                    # Only reboot if the Freebox LAN IP is still reachable.
+                    # If it isn't, the issue is a power failure, not a WAN drop — rebooting would be useless.
                     if _freebox_reachable():
                         _watchdog_state["status"] = "rebooting"
                         _do_reboot()
@@ -420,7 +426,7 @@ def manual_reboot():
 
 @app.route("/connection")
 def connection():
-    """Connection status: state, bandwidth, rates."""
+    """Connection state, current rates (Mbps), max bandwidth (Gbps), and public IPs."""
     data = fbx_get("/connection/")
     if not data.get("success"):
         return jsonify(data), 503
@@ -451,7 +457,7 @@ def connection():
 
 @app.route("/system")
 def system():
-    """System info: temps, fan, uptime, firmware."""
+    """CPU and switch temperatures, fan RPM, uptime, firmware version, serial, and MAC."""
     data = fbx_get("/system/")
     if not data.get("success"):
         return jsonify(data), 503
@@ -487,7 +493,7 @@ def ftth():
 
 @app.route("/connection/full")
 def connection_full():
-    """Combined connection + system + ftth data in a single call for Homepage."""
+    """Aggregated view of connection, system, and FTTH data in a single call for Homepage widgets."""
     conn = fbx_get("/connection/")
     sys_data = fbx_get("/system/")
     ftth_data = fbx_get("/connection/ftth/")

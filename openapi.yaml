@@ -1,0 +1,417 @@
+openapi: "3.0.3"
+info:
+  title: Freebox Proxy API
+  description: |
+    HTTP proxy that handles Freebox OS authentication (app_token + HMAC-SHA1 challenge)
+    and exposes simple JSON endpoints for Homepage (customapi widget) or any HTTP client.
+
+    **Setup:** call `/register` once and approve on the Freebox LCD before using data endpoints.
+  version: "1.0.0"
+
+servers:
+  - url: "http://localhost:5656"
+    description: Local instance (adjust host/port to match your deployment)
+
+tags:
+  - name: status
+    description: Service health
+  - name: registration
+    description: One-time app registration with the Freebox
+  - name: data
+    description: Connection and system data endpoints
+  - name: watchdog
+    description: Connectivity watchdog
+  - name: system
+    description: Freebox control
+
+paths:
+  /:
+    get:
+      summary: Service status
+      description: Returns registration state, watchdog state, and the list of available endpoints.
+      operationId: getStatus
+      tags: [status]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  service:
+                    type: string
+                    example: freebox-proxy
+                  registered:
+                    type: boolean
+                    description: True if an app_token is saved on disk
+                  endpoints:
+                    type: array
+                    items:
+                      type: string
+                    example: ["/connection", "/system", "/ftth", "/connection/full", "/watchdog", "/reboot"]
+                  watchdog:
+                    $ref: "#/components/schemas/WatchdogState"
+
+  /register:
+    get:
+      summary: Start app registration
+      description: |
+        Requests an app_token from the Freebox. The user must approve the request
+        on the Freebox LCD screen within a short time window, then call `/register/status`.
+        If already registered, returns immediately without making a new request.
+      operationId: register
+      tags: [registration]
+      responses:
+        "200":
+          description: Request sent (or already registered)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiResponse"
+                  - type: object
+                    properties:
+                      track_id:
+                        type: integer
+                        description: Track ID to poll with /register/status
+        "500":
+          description: Freebox refused or is unreachable
+
+  /register/status:
+    get:
+      summary: Check registration status
+      description: Polls the Freebox to see whether the LCD approval has been granted.
+      operationId: registerStatus
+      tags: [registration]
+      responses:
+        "200":
+          description: Status response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  status:
+                    type: string
+                    enum: [granted, pending, timeout, denied, unknown]
+                    description: |
+                      - `granted`: approved, token saved, data endpoints are ready
+                      - `pending`: waiting for LCD approval
+                      - `timeout`: approval window expired, call /register again
+                      - `denied`: user rejected on LCD
+                  msg:
+                    type: string
+
+  /register/reset:
+    get:
+      summary: Delete saved token
+      description: Removes the stored app_token to allow re-registration.
+      operationId: registerReset
+      tags: [registration]
+      responses:
+        "200":
+          description: Token deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse"
+
+  /connection:
+    get:
+      summary: Connection status
+      description: Current connection state, down/up rates, max bandwidth, and public IPs.
+      operationId: getConnection
+      tags: [data]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  result:
+                    $ref: "#/components/schemas/ConnectionResult"
+        "503":
+          description: Not authenticated or Freebox unreachable
+
+  /system:
+    get:
+      summary: System info
+      description: CPU and switch temperatures, fan speed, uptime, firmware version, serial, and MAC.
+      operationId: getSystem
+      tags: [data]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  result:
+                    $ref: "#/components/schemas/SystemResult"
+        "503":
+          description: Not authenticated or Freebox unreachable
+
+  /ftth:
+    get:
+      summary: FTTH fiber link info
+      description: |
+        Raw FTTH status forwarded from the Freebox API.
+        Includes SFP presence, signal detection, and RX/TX optical power.
+      operationId: getFtth
+      tags: [data]
+      responses:
+        "200":
+          description: OK (schema mirrors Freebox API response)
+        "503":
+          description: Not authenticated or Freebox unreachable
+
+  /connection/full:
+    get:
+      summary: Combined connection, system, and FTTH data
+      description: |
+        Aggregates /connection, /system, and /ftth into a single response.
+        Useful for Homepage widgets that need multiple metrics from one URL.
+      operationId: getConnectionFull
+      tags: [data]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  result:
+                    $ref: "#/components/schemas/ConnectionFullResult"
+
+  /watchdog:
+    get:
+      summary: Watchdog state and config
+      description: Returns the current connectivity watchdog state and its runtime configuration.
+      operationId: getWatchdog
+      tags: [watchdog]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  result:
+                    $ref: "#/components/schemas/WatchdogState"
+                  config:
+                    $ref: "#/components/schemas/WatchdogConfig"
+
+  /reboot:
+    get:
+      summary: Reboot Freebox
+      description: |
+        Sends a reboot command to the Freebox via the API.
+        Requires the "Modification des réglages" permission enabled in
+        Freebox settings (Paramètres > Gestion des accès > Applications).
+      operationId: reboot
+      tags: [system]
+      responses:
+        "200":
+          description: Reboot command sent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse"
+        "500":
+          description: Reboot failed — check that the required permission is granted
+
+components:
+  schemas:
+    ApiResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        msg:
+          type: string
+
+    WatchdogState:
+      type: object
+      properties:
+        running:
+          type: boolean
+        consecutive_failures:
+          type: integer
+          description: Number of consecutive failed internet checks since the last success
+        last_check:
+          type: string
+          format: date-time
+          nullable: true
+        last_check_ok:
+          type: string
+          format: date-time
+          nullable: true
+          description: Timestamp of the last successful connectivity check
+        last_reboot:
+          type: string
+          format: date-time
+          nullable: true
+          description: Timestamp of the last watchdog-triggered reboot
+        total_reboots:
+          type: integer
+        status:
+          type: string
+          example: "ok"
+          description: Human-readable status (ok, internet_down, rebooting, freebox_unreachable, disabled, no_token, error)
+        last_error:
+          type: string
+          nullable: true
+
+    WatchdogConfig:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        interval:
+          type: integer
+          description: Seconds between connectivity checks
+        check_ips:
+          type: array
+          items:
+            type: string
+          example: ["8.8.8.8", "1.1.1.1"]
+        freebox_ip:
+          type: string
+          description: LAN IP used to verify the Freebox is reachable before rebooting
+          example: "192.168.1.254"
+        failures_before_reboot:
+          type: integer
+          description: Number of consecutive failures required to trigger a reboot
+        cooldown:
+          type: integer
+          description: Seconds to wait after a reboot before resuming checks
+
+    ConnectionResult:
+      type: object
+      properties:
+        state:
+          type: string
+          example: "up"
+          description: Connection state reported by the Freebox (up, down, etc.)
+        media:
+          type: string
+          example: "ftth"
+        type:
+          type: string
+        rate_down:
+          type: integer
+          description: Current download rate in bytes/s
+        rate_up:
+          type: integer
+          description: Current upload rate in bytes/s
+        bandwidth_down:
+          type: integer
+          description: Maximum download bandwidth in bytes/s
+        bandwidth_up:
+          type: integer
+          description: Maximum upload bandwidth in bytes/s
+        bytes_down:
+          type: integer
+          description: Total bytes downloaded since last reboot
+        bytes_up:
+          type: integer
+          description: Total bytes uploaded since last reboot
+        ipv4:
+          type: string
+          example: "1.2.3.4"
+        ipv6:
+          type: string
+        rate_down_mbps:
+          type: number
+          description: Current download rate in Mbps (derived)
+        rate_up_mbps:
+          type: number
+          description: Current upload rate in Mbps (derived)
+        bandwidth_down_gbps:
+          type: number
+          description: Max download bandwidth in Gbps (derived)
+        bandwidth_up_gbps:
+          type: number
+          description: Max upload bandwidth in Gbps (derived)
+
+    SystemResult:
+      type: object
+      properties:
+        firmware_version:
+          type: string
+          example: "4.8.8"
+        uptime:
+          type: string
+          description: Human-readable uptime string from the Freebox
+          example: "3 jours 14 heures"
+        uptime_val:
+          type: integer
+          description: Uptime in seconds
+        temp_cpum:
+          type: integer
+          description: Main CPU temperature in degrees Celsius
+        temp_cpub:
+          type: integer
+          description: Secondary CPU temperature in degrees Celsius
+        temp_sw:
+          type: integer
+          description: Switch chip temperature in degrees Celsius
+        fan_rpm:
+          type: integer
+          description: Fan speed in RPM (0 on fanless models)
+        board_name:
+          type: string
+        serial:
+          type: string
+        mac:
+          type: string
+        disk_status:
+          type: string
+        box_flavor:
+          type: string
+
+    ConnectionFullResult:
+      type: object
+      description: Aggregated view of connection, system, and FTTH data.
+      properties:
+        state:
+          type: string
+          example: "up"
+        rate_down_mbps:
+          type: number
+        rate_up_mbps:
+          type: number
+        bandwidth_down_gbps:
+          type: number
+        bandwidth_up_gbps:
+          type: number
+        uptime:
+          type: string
+        firmware:
+          type: string
+        ftth_status:
+          type: string
+          description: Human-readable FTTH link status
+          enum: ["Connecté", "Signal détecté", "SFP présent (pas de signal)", "Déconnecté"]
+        sfp_pwr_rx:
+          type: number
+          description: Fiber RX optical power in dBm
+        sfp_pwr_tx:
+          type: number
+          description: Fiber TX optical power in dBm

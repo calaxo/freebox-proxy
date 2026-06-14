@@ -1,56 +1,67 @@
 # freebox-proxy
 
-Proxy léger pour exposer l'API Freebox OS à [Homepage](https://gethomepage.dev/) via le widget `customapi`.
+Proxy HTTP léger qui gère l'authentification Freebox OS et expose des endpoints JSON simples pour [Homepage](https://gethomepage.dev/) (widget `customapi`) ou n'importe quel autre client.
 
-## Pourquoi ?
+Inclut un watchdog de connectivité qui redémarre automatiquement la Freebox en cas de coupure internet prolongée.
 
-L'API Freebox nécessite un flow d'authentification HMAC-SHA1 (app_token → challenge → session_token) que Homepage ne peut pas gérer nativement. Ce proxy gère l'auth et expose des endpoints JSON simples.
+## Contexte
+
+L'API Freebox OS exige un flow d'authentification à trois étapes : obtention d'un `app_token` (approuvé manuellement sur l'écran LCD), récupération d'un challenge, puis calcul d'une signature HMAC-SHA1 pour ouvrir une session valide 10 minutes. Homepage ne peut pas gérer ce mécanisme nativement, d'où ce proxy.
 
 ## Endpoints
 
 | Endpoint | Description |
 |---|---|
-| `/connection` | État connexion, débit down/up (Mbps), bande passante (Gbps), IP |
-| `/system` | Températures CPU/Switch, ventilateur RPM, uptime, firmware |
-| `/ftth` | Info fibre optique (SFP, puissance) |
-| `/connection/full` | Toutes les infos combinées |
-| `/register` | Enregistrement initial auprès de la Freebox |
-| `/register/status` | Vérifier le statut d'enregistrement |
+| `GET /` | Statut du service, état d'enregistrement, liste des endpoints |
+| `GET /connection` | État de la connexion, débits down/up (Mbps), bande passante (Gbps), IP publique |
+| `GET /system` | Températures CPU/Switch, RPM ventilateur, uptime, version firmware |
+| `GET /ftth` | Données fibre : présence SFP, puissance RX/TX |
+| `GET /connection/full` | Connexion + système + FTTH en un seul appel (utile pour Homepage) |
+| `GET /watchdog` | État du watchdog et sa configuration |
+| `GET /reboot` | Déclenche un redémarrage manuel de la Freebox |
+| `GET /register` | Démarre l'enregistrement initial |
+| `GET /register/status` | Vérifie si l'autorisation a été accordée sur l'écran LCD |
+| `GET /register/reset` | Supprime le token pour recommencer l'enregistrement |
 
-## Setup
+La documentation complète des schémas de réponse est dans [`openapi.yaml`](openapi.yaml) (importable sur [editor.swagger.io](https://editor.swagger.io) sans installation).
 
-### 1. Déployer
+## Démarrage rapide
+
+### 1. Configurer l'environnement
 
 ```bash
 cp .env.example .env
-# Éditez .env selon vos besoins
+# Adapter les valeurs si nécessaire (le fichier est commenté)
 ```
 
+### 2. Déployer avec Docker Compose
+
 ```yaml
-# docker-compose.yml
 services:
   freebox-proxy:
     image: ghcr.io/<your-github-user>/freebox-proxy:latest
     container_name: freebox-proxy
     restart: unless-stopped
     env_file: .env
-    ports:
-      - "${LISTEN_PORT:-5656}:${LISTEN_PORT:-5656}"
+    network_mode: host
     volumes:
       - freebox_data:/data
-    network_mode: host
 
 volumes:
   freebox_data:
 ```
 
-### 2. Enregistrer (une seule fois)
+`network_mode: host` est nécessaire : le ping du watchdog et les appels vers `mafreebox.freebox.fr` requièrent un accès direct au réseau local.
+
+### 3. Enregistrer le proxy (une seule fois)
 
 1. Ouvrir `http://<host>:5656/register`
-2. Approuver sur l'écran LCD de la Freebox
-3. Vérifier avec `http://<host>:5656/register/status`
+2. Approuver la demande sur l'écran LCD de la Freebox
+3. Confirmer avec `http://<host>:5656/register/status`
 
-### 3. Utiliser dans Homepage
+Pour activer le redémarrage automatique, activer la permission **"Modification des réglages"** dans l'interface Freebox (Paramètres > Gestion des accès > Applications).
+
+### 4. Utiliser dans Homepage
 
 ```yaml
 - Freebox:
@@ -59,12 +70,28 @@ volumes:
       url: "http://<host>:5656/connection"
       mappings:
         - field:
-              result: rate_down_mbps
+            result: rate_down_mbps
           label: Download
+          format: number
+          suffix: " Mbps"
+        - field:
+            result: rate_up_mbps
+          label: Upload
           format: number
           suffix: " Mbps"
 ```
 
-## Build
+## Watchdog
 
-L'image Docker est construite automatiquement par GitHub Actions lors d'un merge vers la branche `build` et publiée sur GHCR.
+Le watchdog ping les IPs définies dans `WATCHDOG_CHECK_IPS` à intervalle régulier. Après `WATCHDOG_FAILURES_BEFORE_REBOOT` échecs consécutifs, il vérifie que la Freebox est joignable en LAN (pour distinguer une coupure internet d'une panne d'alimentation) avant d'envoyer la commande de redémarrage. Un cooldown de `WATCHDOG_COOLDOWN` secondes s'applique ensuite.
+
+L'état en temps réel est visible sur `GET /watchdog`.
+
+## Build local
+
+```bash
+docker build -t freebox-proxy .
+docker run --network host -v freebox_data:/data freebox-proxy
+```
+
+L'image Docker est également construite et publiée sur GHCR automatiquement par GitHub Actions au merge d'une PR vers la branche `build`.
