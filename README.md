@@ -81,6 +81,27 @@ Pour activer le redémarrage automatique, activer la permission **"Modification 
           suffix: " Mbps"
 ```
 
+## Configuration
+
+Toutes les options passent par des variables d'environnement (voir [`.env.example`](.env.example)) :
+
+| Variable | Défaut | Rôle |
+|---|---|---|
+| `FREEBOX_URL` | `http://mafreebox.freebox.fr` | URL de l'API Freebox OS sur le LAN |
+| `FREEBOX_API_VERSION` | `v4` | Version de l'API Freebox |
+| `TOKEN_FILE` | `/data/app_token.json` | Emplacement de l'`app_token` persisté (à monter dans un volume) |
+| `APP_ID` / `APP_NAME` / `APP_VERSION` | `fr.freebox.proxy` / `Freebox Proxy` / `1.0` | Identité de l'application affichée sur l'écran LCD |
+| `DEVICE_NAME` | `Docker Server` | Nom de la machine affiché lors de l'enregistrement |
+| `LISTEN_PORT` | `5656` | Port d'écoute du proxy |
+| `WATCHDOG_ENABLED` | `true` | Active le redémarrage automatique |
+| `WATCHDOG_INTERVAL` | `60` | Secondes entre deux vérifications |
+| `WATCHDOG_CHECK_IPS` | `8.8.8.8,1.1.1.1` | IPs publiques pingées pour tester internet |
+| `WATCHDOG_FREEBOX_IP` | `192.168.1.254` | IP LAN de la Freebox |
+| `WATCHDOG_FAILURES_BEFORE_REBOOT` | `3` | Échecs consécutifs avant redémarrage |
+| `WATCHDOG_COOLDOWN` | `300` | Secondes d'attente après un redémarrage |
+
+Le fichier `.env` et le dossier `/data` (qui contient l'`app_token`) sont exclus du dépôt : ne les publiez jamais.
+
 ## Watchdog
 
 Le watchdog ping les IPs définies dans `WATCHDOG_CHECK_IPS` à intervalle régulier. Après `WATCHDOG_FAILURES_BEFORE_REBOOT` échecs consécutifs, il vérifie que la Freebox est joignable en LAN (pour distinguer une coupure internet d'une panne d'alimentation) avant d'envoyer la commande de redémarrage. Un cooldown de `WATCHDOG_COOLDOWN` secondes s'applique ensuite.
@@ -95,3 +116,9 @@ docker run --network host -v freebox_data:/data freebox-proxy
 ```
 
 L'image Docker est également construite et publiée sur GHCR automatiquement par GitHub Actions au merge d'une PR vers la branche `build`.
+
+## Licence
+
+[MIT](LICENSE) © calaxo : vous pouvez réutiliser, modifier et redistribuer ce code, y compris à des fins commerciales, à condition de conserver la mention de copyright et le texte de la licence. Un lien vers ce dépôt est apprécié.
+
+Projet indépendant, non affilié à Free ni à Iliad.
